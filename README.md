@@ -106,9 +106,12 @@ Now every `import { Topic } from "roslib"` resolves to this adapter with zero so
   `foxglove_bridge`, so wrap a goal service + feedback topic yourself if you need them).
 - `Topic#advertise()` / `Topic#unadvertise()` are accepted but are no-ops — the adapter advertises
   lazily on first `publish()`.
-- `compression`, `throttle_rate`, `queue_size`, `queue_length`, `latch`, `reconnect_on_close`
-  options on `Topic` are accepted for API compatibility but ignored; `foxglove_bridge` negotiates
-  these on its own.
+- `throttle_rate` is enforced **client-side** (leading-edge, minimum ms between delivered messages)
+  since `foxglove_bridge` has no per-subscription rate limiter. When unset or `0`, the subscribe path
+  registers the user callback directly — no wrapper, no clock read, no branch per message.
+- `compression`, `queue_size`, `queue_length`, `latch`, `reconnect_on_close` options on `Topic` are
+  accepted for API compatibility but ignored; `foxglove_bridge` negotiates transport concerns on its
+  own.
 
 ## Requirements
 

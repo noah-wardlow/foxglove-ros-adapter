@@ -1,6 +1,6 @@
 {
   "name": "foxglove-ros-adapter",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Drop-in replacement for roslib that speaks the Foxglove WebSocket protocol to foxglove_bridge. Same Ros/Topic/Service/Param/ROS2TFClient API, zero source changes at call sites.",
   "keywords": [
     "ros",
