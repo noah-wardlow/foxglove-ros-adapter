@@ -1,0 +1,66 @@
+{
+  "name": "foxglove-ros-adapter",
+  "version": "0.1.0",
+  "description": "Drop-in replacement for roslib that speaks the Foxglove WebSocket protocol to foxglove_bridge. Same Ros/Topic/Service/Param/ROS2TFClient API, zero source changes at call sites.",
+  "keywords": [
+    "ros",
+    "ros2",
+    "roslib",
+    "foxglove",
+    "foxglove-bridge",
+    "websocket",
+    "cdr",
+    "robotics"
+  ],
+  "license": "MIT",
+  "author": "Noah Wardlow",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/noah-wardlow/foxglove-ros-adapter.git"
+  },
+  "bugs": {
+    "url": "https://github.com/noah-wardlow/foxglove-ros-adapter/issues"
+  },
+  "homepage": "https://github.com/noah-wardlow/foxglove-ros-adapter#readme",
+  "type": "module",
+  "main": "./dist/index.cjs",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "require": "./dist/index.cjs"
+    }
+  },
+  "files": [
+    "dist",
+    "src",
+    "README.md",
+    "LICENSE"
+  ],
+  "sideEffects": false,
+  "scripts": {
+    "build": "tsup",
+    "clean": "rm -rf dist",
+    "typecheck": "tsc --noEmit",
+    "prepublishOnly": "pnpm run clean && pnpm run typecheck && pnpm run build"
+  },
+  "peerDependencies": {
+    "zod": "^3.22.0 || ^4.0.0"
+  },
+  "dependencies": {
+    "@foxglove/rosmsg": "^5.0.5",
+    "@foxglove/rosmsg2-serialization": "^3.0.3"
+  },
+  "devDependencies": {
+    "@types/node": "^20.11.0",
+    "tsup": "^8.0.0",
+    "typescript": "^5.4.0",
+    "zod": "^4.3.6"
+  },
+  "packageManager": "pnpm@9.0.0",
+  "engines": {
+    "node": ">=18"
+  }
+}
