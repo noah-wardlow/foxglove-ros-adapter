@@ -47,13 +47,13 @@
     "prepublishOnly": "pnpm run clean && pnpm run typecheck && pnpm run build"
   },
   "peerDependencies": {
+    "@foxglove/rosmsg": "^5.0.0",
+    "@foxglove/rosmsg2-serialization": "^3.0.0",
     "zod": "^3.22.0 || ^4.0.0"
   },
-  "dependencies": {
-    "@foxglove/rosmsg": "^5.0.5",
-    "@foxglove/rosmsg2-serialization": "^3.0.3"
-  },
   "devDependencies": {
+    "@foxglove/rosmsg": "^5.0.5",
+    "@foxglove/rosmsg2-serialization": "^3.0.3",
     "@types/node": "^20.11.0",
     "tsup": "^8.0.0",
     "typescript": "^5.4.0",

@@ -27,10 +27,11 @@ npm install foxglove-ros-adapter
 yarn add foxglove-ros-adapter
 ```
 
-`zod` is a peer dependency — install whichever major version you already use:
+`zod`, `@foxglove/rosmsg`, and `@foxglove/rosmsg2-serialization` are peer dependencies — install
+alongside the adapter so they dedupe with anything else in your tree:
 
 ```bash
-pnpm add zod
+pnpm add zod @foxglove/rosmsg @foxglove/rosmsg2-serialization
 ```
 
 ## Usage

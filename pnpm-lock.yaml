@@ -7,14 +7,13 @@ settings:
 importers:
 
   .:
-    dependencies:
+    devDependencies:
       '@foxglove/rosmsg':
         specifier: ^5.0.5
         version: 5.0.5
       '@foxglove/rosmsg2-serialization':
         specifier: ^3.0.3
         version: 3.0.3
-    devDependencies:
       '@types/node':
         specifier: ^20.11.0
         version: 20.19.39
