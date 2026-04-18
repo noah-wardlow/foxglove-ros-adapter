@@ -258,10 +258,18 @@ export class Ros {
     }
 
     if (!clientCh.writer) {
+      const knownSchemas = new Set<string>();
+      for (const channel of this.channels.values()) {
+        knownSchemas.add(channel.schemaName);
+      }
       throw new Error(
         `Cannot publish to "${topic}": no message definition available for ` +
           `"${clientCh.schemaName}". The topic must be advertised by the ` +
-          `server, or the schema must be supplied at publish time.`
+          `server, or the schema must be supplied at publish time. ` +
+          `Known schemas on advertised channels (${knownSchemas.size}): ` +
+          `${Array.from(knownSchemas).slice(0, 10).join(", ")}${
+            knownSchemas.size > 10 ? ", ..." : ""
+          }`
       );
     }
 
@@ -270,8 +278,9 @@ export class Ros {
   }
 
   private findWriterForSchema(schemaName: string): MessageWriter | null {
+    const canonical = normalizeRosType(schemaName, "msg");
     for (const channel of this.channels.values()) {
-      if (channel.schemaName === schemaName) {
+      if (normalizeRosType(channel.schemaName, "msg") === canonical) {
         return this.getWriter(channel.schemaName, channel.schema);
       }
     }
