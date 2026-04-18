@@ -29,14 +29,6 @@ export type MessageCallback = (message: Record<string, unknown>) => void;
  *   - ROS 1 style (`std_msgs/String` → `std_msgs/msg/String`)
  *   - already-canonical forms (left untouched)
  */
-/**
- * Translate roslib-style parameter names (`/node:param`) to the `/node.param`
- * form foxglove_bridge expects so callers written against rosbridge keep working.
- */
-function toFoxgloveParamName(name: string): string {
-  return name.replace(":", ".");
-}
-
 function normalizeRosType(type: string, kind: "msg" | "srv" = "msg"): string {
   const trimmed = type.replace(/^\/+/, "");
   if (trimmed.includes(`/${kind}/`)) {
@@ -47,6 +39,14 @@ function normalizeRosType(type: string, kind: "msg" | "srv" = "msg"): string {
     return trimmed;
   }
   return `${trimmed.slice(0, slash)}/${kind}/${trimmed.slice(slash + 1)}`;
+}
+
+/**
+ * Translate roslib-style parameter names (`/node:param`) to the `/node.param`
+ * form foxglove_bridge expects so callers written against rosbridge keep working.
+ */
+function toFoxgloveParamName(name: string): string {
+  return name.replace(":", ".");
 }
 
 /** Pending service call awaiting a response. */
@@ -248,22 +248,13 @@ export class Ros {
         "cdr",
         schemaName
       );
-      const serverChannel = this.channelsByTopic.get(topic);
-      const writer = serverChannel
-        ? this.getWriter(serverChannel.schemaName, serverChannel.schema)
-        : null;
+      const writer = this.findWriterForSchema(schemaName);
       clientCh = { clientChannelId, topic, schemaName, writer };
       this.clientChannels.set(topic, clientCh);
     }
 
     if (!clientCh.writer) {
-      const serverChannel = this.channelsByTopic.get(topic);
-      if (serverChannel) {
-        clientCh.writer = this.getWriter(
-          serverChannel.schemaName,
-          serverChannel.schema
-        );
-      }
+      clientCh.writer = this.findWriterForSchema(clientCh.schemaName);
     }
 
     if (!clientCh.writer) {
@@ -276,6 +267,15 @@ export class Ros {
 
     const cdrData = clientCh.writer.writeMessage(message);
     this.protocol.publishMessage(clientCh.clientChannelId, cdrData);
+  }
+
+  private findWriterForSchema(schemaName: string): MessageWriter | null {
+    for (const channel of this.channels.values()) {
+      if (channel.schemaName === schemaName) {
+        return this.getWriter(channel.schemaName, channel.schema);
+      }
+    }
+    return null;
   }
 
   unpublishTopic(topic: string): void {
