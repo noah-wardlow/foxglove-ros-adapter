@@ -249,8 +249,16 @@ export class Ros {
     }
 
     if (!clientCh.writer) {
-      // No schema available — cannot serialize. Fail loudly rather than
-      // silently dropping the publish, which is very hard to diagnose.
+      const serverChannel = this.channelsByTopic.get(topic);
+      if (serverChannel) {
+        clientCh.writer = this.getWriter(
+          serverChannel.schemaName,
+          serverChannel.schema
+        );
+      }
+    }
+
+    if (!clientCh.writer) {
       throw new Error(
         `Cannot publish to "${topic}": no message definition available for ` +
           `"${clientCh.schemaName}". The topic must be advertised by the ` +
