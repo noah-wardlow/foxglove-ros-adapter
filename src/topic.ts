@@ -57,8 +57,8 @@ export class Topic<T = Record<string, unknown>> {
     this.name = options.name;
     this.messageType = options.messageType;
     // Non-finite / negative / zero → no throttling.
-    const rate = options.throttle_rate;
-    this.throttleMs = rate && rate > 0 && Number.isFinite(rate) ? rate : 0;
+    const rate = options.throttle_rate ?? 0;
+    this.throttleMs = Number.isFinite(rate) && rate > 0 ? rate : 0;
   }
 
   /**
