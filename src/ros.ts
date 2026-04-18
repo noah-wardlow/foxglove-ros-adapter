@@ -29,6 +29,14 @@ export type MessageCallback = (message: Record<string, unknown>) => void;
  *   - ROS 1 style (`std_msgs/String` → `std_msgs/msg/String`)
  *   - already-canonical forms (left untouched)
  */
+/**
+ * Translate roslib-style parameter names (`/node:param`) to the `/node.param`
+ * form foxglove_bridge expects so callers written against rosbridge keep working.
+ */
+function toFoxgloveParamName(name: string): string {
+  return name.replace(":", ".");
+}
+
 function normalizeRosType(type: string, kind: "msg" | "srv" = "msg"): string {
   const trimmed = type.replace(/^\/+/, "");
   if (trimmed.includes(`/${kind}/`)) {
@@ -319,20 +327,22 @@ export class Ros {
 
   getParam(name: string): Promise<unknown> {
     return new Promise((resolve) => {
+      const wireName = toFoxgloveParamName(name);
       const requestId = `param_get_${Date.now()}_${Math.random()}`;
       this.pendingParamRequests.set(requestId, (params) => {
-        const param = params.find((p) => p.name === name);
+        const param = params.find((p) => toFoxgloveParamName(p.name) === wireName);
         resolve(param?.value ?? null);
       });
-      this.protocol.getParameters([name], requestId);
+      this.protocol.getParameters([wireName], requestId);
     });
   }
 
   setParam(name: string, value: unknown): Promise<void> {
     return new Promise((resolve) => {
+      const wireName = toFoxgloveParamName(name);
       const requestId = `param_set_${Date.now()}_${Math.random()}`;
       this.pendingParamRequests.set(requestId, () => resolve());
-      this.protocol.setParameters([{ name, value }], requestId);
+      this.protocol.setParameters([{ name: wireName, value }], requestId);
     });
   }
 
