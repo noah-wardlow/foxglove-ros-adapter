@@ -66,8 +66,12 @@ export class Topic<T = Record<string, unknown>> {
    * advertises lazily the first time `publish()` is called, so explicit
    * registration has no effect on the wire.
    */
-  advertise(): void {}
-  unadvertise(): void {}
+  advertise(): void {
+    // Intentional no-op — the foxglove adapter advertises lazily on first publish().
+  }
+  unadvertise(): void {
+    // Intentional no-op — the foxglove adapter manages client channel lifetimes.
+  }
 
   subscribe(callback: (message: T) => void): void {
     if (this.wrappedCallbacks.has(callback)) {
