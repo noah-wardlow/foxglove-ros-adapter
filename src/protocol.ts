@@ -38,6 +38,7 @@ export interface ProtocolEvents {
   unadvertiseServices: (serviceIds: number[]) => void;
   message: (subscriptionId: number, timestamp: bigint, data: Uint8Array) => void;
   serviceResponse: (response: ServiceCallResponse) => void;
+  serviceCallFailure: (failure: ServiceCallFailure) => void;
   parameterValues: (id: string, params: ParameterValue[]) => void;
   open: () => void;
   close: (event: CloseEvent) => void;
@@ -55,6 +56,12 @@ export interface ServiceCallResponse {
   callId: number;
   encoding: string;
   data: Uint8Array;
+}
+
+export interface ServiceCallFailure {
+  serviceId: number;
+  callId: number;
+  message: string;
 }
 
 /**
@@ -76,6 +83,7 @@ export class FoxgloveProtocolClient {
     unadvertiseServices: new Set(),
     message: new Set(),
     serviceResponse: new Set(),
+    serviceCallFailure: new Set(),
     parameterValues: new Set(),
     open: new Set(),
     close: new Set(),
@@ -101,14 +109,19 @@ export class FoxgloveProtocolClient {
   }
 
   close(): void {
-    if (this.ws) {
-      this.ws.onopen = null;
-      this.ws.onclose = null;
-      this.ws.onerror = null;
-      this.ws.onmessage = null;
-      this.ws.close();
-      this.ws = null;
-    }
+    const ws = this.ws;
+    if (!ws) return;
+    // Null the reference first so re-entry from a close handler is idempotent.
+    this.ws = null;
+    // Fire close synchronously before suppressing the socket's onclose, so
+    // reconnect doesn't silently drop the prior session's close event.
+    this.dispatch(this.handlers.close, (h) => h(new CloseEvent("close")), "close");
+
+    ws.onopen = null;
+    ws.onclose = null;
+    ws.onerror = null;
+    ws.onmessage = null;
+    ws.close();
   }
 
   get isConnected(): boolean {
@@ -152,7 +165,7 @@ export class FoxgloveProtocolClient {
   }
 
   publishMessage(channelId: number, data: Uint8Array): void {
-    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return;
+    if (this.ws?.readyState !== WebSocket.OPEN) return;
     // Binary format: [opcode:1][channelId:4][data:variable]
     const msg = new Uint8Array(1 + 4 + data.byteLength);
     const view = new DataView(msg.buffer);
@@ -166,7 +179,7 @@ export class FoxgloveProtocolClient {
 
   callService(serviceId: number, encoding: string, requestData: Uint8Array): number {
     const callId = this.nextCallId++;
-    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return callId;
+    if (this.ws?.readyState !== WebSocket.OPEN) return callId;
 
     const encodingBytes = new TextEncoder().encode(encoding);
     // Binary format: [opcode:1][serviceId:4][callId:4][encodingLength:4][encoding:var][requestData:var]
@@ -304,6 +317,18 @@ export class FoxgloveProtocolClient {
         else console.warn("[foxglove]", message);
         break;
       }
+      case "serviceCallFailure":
+        this.dispatch(
+          this.handlers.serviceCallFailure,
+          (h) =>
+            h({
+              serviceId: msg.serviceId,
+              callId: msg.callId,
+              message: msg.message ?? "service call failed"
+            }),
+          "serviceCallFailure"
+        );
+        break;
     }
   }
 
@@ -352,7 +377,7 @@ export class FoxgloveProtocolClient {
   }
 
   private sendJson(msg: Record<string, unknown>): void {
-    if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+    if (this.ws?.readyState === WebSocket.OPEN) {
       this.ws.send(JSON.stringify(msg));
     }
   }

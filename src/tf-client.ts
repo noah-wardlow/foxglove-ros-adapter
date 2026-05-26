@@ -115,16 +115,18 @@ export class ROS2TFClient {
   }
 
   private subscribeTF(): void {
-    const handler: MessageCallback = (msg) => {
-      const parsed = tfMessageSchema.safeParse(msg);
-      if (parsed.success) this.handleTFMessage(parsed.data);
-    };
+    // Distinct callback identities — Topic.unsubscribe keys by reference, so
+    // sharing one arrow makes dispose()'s second unsubscribe a no-op.
+    this.tfSub = (msg) => this.dispatchTFMessage(msg);
+    this.ros.subscribeTopic("/tf", "tf2_msgs/msg/TFMessage", this.tfSub);
 
-    this.tfSub = handler;
-    this.ros.subscribeTopic("/tf", "tf2_msgs/msg/TFMessage", handler);
+    this.tfStaticSub = (msg) => this.dispatchTFMessage(msg);
+    this.ros.subscribeTopic("/tf_static", "tf2_msgs/msg/TFMessage", this.tfStaticSub);
+  }
 
-    this.tfStaticSub = handler;
-    this.ros.subscribeTopic("/tf_static", "tf2_msgs/msg/TFMessage", handler);
+  private dispatchTFMessage(msg: Record<string, unknown>): void {
+    const parsed = tfMessageSchema.safeParse(msg);
+    if (parsed.success) this.handleTFMessage(parsed.data);
   }
 
   private handleTFMessage(msg: TFMessage): void {

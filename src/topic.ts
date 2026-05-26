@@ -62,15 +62,22 @@ export class Topic<T = Record<string, unknown>> {
   }
 
   /**
-   * No-op advertise/unadvertise for roslib compatibility. The foxglove adapter
-   * advertises lazily the first time `publish()` is called, so explicit
+   * advertise() is a no-op: the foxglove adapter advertises a client channel
+   * lazily on the first publish() and reuses it afterwards, so explicit
    * registration has no effect on the wire.
    */
   advertise(): void {
     // Intentional no-op — the foxglove adapter advertises lazily on first publish().
   }
+
+  /**
+   * Release the client channel allocated by the lazy advertise on first publish().
+   * Callers that publish once then tear down (e.g. joint-control-spinners' StoreJointState
+   * burst) rely on this to drop the channel registration rather than leaking it for the
+   * life of the Ros connection.
+   */
   unadvertise(): void {
-    // Intentional no-op — the foxglove adapter manages client channel lifetimes.
+    this.ros.unpublishTopic(this.name);
   }
 
   subscribe(callback: (message: T) => void): void {

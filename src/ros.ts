@@ -12,12 +12,18 @@ import { MessageReader, MessageWriter } from "@foxglove/rosmsg2-serialization";
 import {
   FoxgloveProtocolClient,
   type ServiceCallResponse,
+  type ServiceCallFailure,
   type ParameterValue
 } from "./protocol";
 import type { FoxgloveChannel, FoxgloveService } from "./types";
 
 type RosEventName = "connection" | "error" | "close";
-type RosCallback = () => void;
+// roslib emits "connection" / "close" with no args and "error" with an Error.
+// Split callback types so each `on()` overload type-checks at the call site
+// without the caller having to widen `e` to `unknown` and narrow back.
+type RosLifecycleCallback = () => void;
+type RosErrorCallback = (error: Error) => void;
+type RosCallback = RosLifecycleCallback | RosErrorCallback;
 
 /** Callback for incoming topic messages (deserialized to JS objects). */
 export type MessageCallback = (message: Record<string, unknown>) => void;
@@ -46,7 +52,7 @@ function normalizeRosType(type: string, kind: "msg" | "srv" = "msg"): string {
  * form foxglove_bridge expects so callers written against rosbridge keep working.
  */
 function toFoxgloveParamName(name: string): string {
-  return name.replace(":", ".");
+  return name.replaceAll(":", ".");
 }
 
 /** Pending service call awaiting a response. */
@@ -76,7 +82,13 @@ interface ClientChannel {
   clientChannelId: number;
   topic: string;
   schemaName: string;
-  // null until the server advertises a matching schema we can use to serialize.
+  // Wire encoding agreed with the server at client-advertise time. CDR is the
+  // hot path (matches the binary encoding used for subscribe traffic); JSON is
+  // the fallback when we can't build a CDR writer because the schema isn't on
+  // any server-advertised channel (e.g. startup race, or a type the ROS
+  // interface registry hasn't surfaced yet).
+  encoding: "cdr" | "json";
+  // Non-null only when encoding === "cdr".
   writer: MessageWriter | null;
 }
 
@@ -101,13 +113,21 @@ export class Ros {
   // Service call correlation
   private readonly pendingServiceCalls = new Map<number, PendingServiceCall>(); // callId → pending
 
-  // Parameter request correlation
+  // Splitting onValues/onClose lets callers distinguish "param missing"
+  // (resolve null) from "WebSocket closed before reply" (reject).
   private readonly pendingParamRequests = new Map<
     string,
-    (params: ParameterValue[]) => void
+    {
+      onValues: (params: ParameterValue[]) => void;
+      onClose: () => void;
+    }
   >();
+  private nextParamRequestId = 1;
 
-  // Compiled reader/writer caches keyed by `${schemaName}:${schema.length}`.
+  // Compiled reader/writer caches keyed by the canonical schema name plus the
+  // full schema text. The full text is the only collision-free identity:
+  // schema.length alone collides for equal-length schemas, and schemaName alone
+  // collides across distros that share a type name but evolve its fields.
   // MessageReader / MessageWriter internally pre-compile per-type decode paths
   // from a MessageDefinition list, so we reuse them across messages instead of
   // re-parsing the schema on every topic/service hit.
@@ -132,6 +152,8 @@ export class Ros {
     this.isConnected = false;
   }
 
+  on(event: "error", callback: RosErrorCallback): void;
+  on(event: "connection" | "close", callback: RosLifecycleCallback): void;
   on(event: RosEventName, callback: RosCallback): void {
     let set = this.eventListeners.get(event);
     if (!set) {
@@ -141,19 +163,43 @@ export class Ros {
     set.add(callback);
   }
 
+  off(event: "error", callback: RosErrorCallback): void;
+  off(event: "connection" | "close", callback: RosLifecycleCallback): void;
   off(event: RosEventName, callback: RosCallback): void {
     this.eventListeners.get(event)?.delete(callback);
   }
 
-  emit(event: RosEventName): void {
+  /**
+   * roslib-compatible bulk listener removal. Tests use this to reset the
+   * module-level mock Ros between cases; production code does not call it.
+   */
+  removeAllListeners(event?: RosEventName): void {
+    if (event) {
+      this.eventListeners.get(event)?.clear();
+    } else {
+      for (const set of this.eventListeners.values()) {
+        set.clear();
+      }
+    }
+  }
+
+  emit(event: "error", error: Error): void;
+  emit(event: "connection" | "close"): void;
+  emit(event: RosEventName, error?: Error): void {
     const set = this.eventListeners.get(event);
-    if (set) {
-      for (const cb of set) {
-        try {
-          cb();
-        } catch (e) {
-          console.warn(`Error in Ros "${event}" handler:`, e);
-        }
+    if (!set) return;
+    // Per-event Sets are homogeneous by the on() overloads (error → RosErrorCallback,
+    // connection/close → RosLifecycleCallback), so the variadic call is structurally
+    // safe at runtime even though TypeScript can't narrow the union at this point.
+    const payload =
+      event === "error"
+        ? [error ?? new Error("ros emit('error') called without an error")]
+        : [];
+    for (const cb of set) {
+      try {
+        (cb as (...args: unknown[]) => void)(...payload); // eslint-disable-line @typescript-eslint/consistent-type-assertions -- see comment above; widening the dispatch type is the only way to call a union of arities without per-call narrowing.
+      } catch (e) {
+        console.warn(`Error in Ros "${event}" handler:`, e);
       }
     }
   }
@@ -173,11 +219,13 @@ export class Ros {
    * roslib's `Ros#getTopicsForType(type, success, fail)` callback API so
    * existing callers (e.g. `useImageTopics`) can use this adapter unchanged.
    */
-  getTopicsForType(
-    messageType: string,
-    onSuccess: (topics: string[]) => void,
-    _onError?: (message: string) => void
-  ): void {
+  /**
+   * The roslib signature also accepts an `onError` callback. Foxglove resolves
+   * synchronously from the in-memory channel registry, so the failure path is
+   * unreachable; we drop the parameter to keep lint clean. Callers that pass
+   * one are unaffected — extra arguments to a JS function are ignored.
+   */
+  getTopicsForType(messageType: string, onSuccess: (topics: string[]) => void): void {
     const canonical = normalizeRosType(messageType, "msg");
     const topics: string[] = [];
     for (const ch of this.channels.values()) {
@@ -209,6 +257,19 @@ export class Ros {
   }
 
   unsubscribeTopic(topic: string, callback?: MessageCallback): void {
+    // A caller may unsubscribe before the channel has been advertised, in
+    // which case the callback lives in `pendingSubscribers` and there is no
+    // active subscription yet. Drop the matching queued entry/entries first
+    // so processPendingSubscribers cannot later wire the dead callback to a
+    // fresh subscription once the server's advertise arrives.
+    const keep = this.pendingSubscribers.filter(
+      (p) => p.topic !== topic || (callback !== undefined && p.callback !== callback)
+    );
+    if (keep.length !== this.pendingSubscribers.length) {
+      this.pendingSubscribers.length = 0;
+      this.pendingSubscribers.push(...keep);
+    }
+
     const sub = this.subscriptionsByTopic.get(topic);
     if (!sub) return;
 
@@ -243,38 +304,46 @@ export class Ros {
 
     if (!clientCh) {
       const schemaName = normalizeRosType(messageType, "msg");
+      const writer = this.findWriterForSchema(schemaName);
+      // Encoding is fixed at advertise time. Prefer CDR (smaller, faster) when
+      // we can find a matching schema; otherwise advertise JSON so
+      // foxglove_bridge converts our payload to the ROS message using its own
+      // type-registry. JSON keeps subscriber-only / unknown-schema topics
+      // working at the cost of a few extra bytes per publish.
+      const encoding: "cdr" | "json" = writer ? "cdr" : "json";
       const clientChannelId = this.protocol.advertiseClientChannel(
         topic,
-        "cdr",
+        encoding,
         schemaName
       );
-      const writer = this.findWriterForSchema(schemaName);
-      clientCh = { clientChannelId, topic, schemaName, writer };
+      clientCh = { clientChannelId, topic, schemaName, encoding, writer };
       this.clientChannels.set(topic, clientCh);
     }
 
-    if (!clientCh.writer) {
-      clientCh.writer = this.findWriterForSchema(clientCh.schemaName);
-    }
-
-    if (!clientCh.writer) {
-      const knownSchemas = new Set<string>();
-      for (const channel of this.channels.values()) {
-        knownSchemas.add(channel.schemaName);
+    if (clientCh.encoding === "cdr") {
+      // The CDR writer is built from a schema on a server-advertised channel.
+      // If the schema only became available after this channel was advertised,
+      // pick it up lazily here.
+      if (!clientCh.writer) {
+        clientCh.writer = this.findWriterForSchema(clientCh.schemaName);
       }
-      throw new Error(
-        `Cannot publish to "${topic}": no message definition available for ` +
-          `"${clientCh.schemaName}". The topic must be advertised by the ` +
-          `server, or the schema must be supplied at publish time. ` +
-          `Known schemas on advertised channels (${knownSchemas.size}): ` +
-          `${Array.from(knownSchemas).slice(0, 10).join(", ")}${
-            knownSchemas.size > 10 ? ", ..." : ""
-          }`
-      );
+      if (!clientCh.writer) {
+        // Schema still unknown — should not happen because the encoding was
+        // chosen at advertise time, but guard so a serialization failure is
+        // loud rather than silent.
+        throw new Error(
+          `Cannot publish CDR to "${topic}": schema "${clientCh.schemaName}" disappeared from advertised channels.`
+        );
+      }
+      const cdrData = clientCh.writer.writeMessage(message);
+      this.protocol.publishMessage(clientCh.clientChannelId, cdrData);
+      return;
     }
 
-    const cdrData = clientCh.writer.writeMessage(message);
-    this.protocol.publishMessage(clientCh.clientChannelId, cdrData);
+    // JSON fallback: serialize as UTF-8 JSON; the bridge converts to the ROS
+    // message via its type registry on the receiving side.
+    const jsonData = new TextEncoder().encode(JSON.stringify(message));
+    this.protocol.publishMessage(clientCh.clientChannelId, jsonData);
   }
 
   private findWriterForSchema(schemaName: string): MessageWriter | null {
@@ -335,22 +404,30 @@ export class Ros {
   // ─── Parameters ─────────────────────────────────────────────────────────
 
   getParam(name: string): Promise<unknown> {
-    return new Promise((resolve) => {
+    return new Promise((resolve, reject) => {
       const wireName = toFoxgloveParamName(name);
-      const requestId = `param_get_${Date.now()}_${Math.random()}`;
-      this.pendingParamRequests.set(requestId, (params) => {
-        const param = params.find((p) => toFoxgloveParamName(p.name) === wireName);
-        resolve(param?.value ?? null);
+      const requestId = `param_get_${this.nextParamRequestId++}`;
+      this.pendingParamRequests.set(requestId, {
+        onValues: (params) => {
+          const param = params.find((p) => toFoxgloveParamName(p.name) === wireName);
+          resolve(param?.value ?? null);
+        },
+        onClose: () =>
+          reject(new Error(`getParam(${name}): WebSocket closed before response`))
       });
       this.protocol.getParameters([wireName], requestId);
     });
   }
 
   setParam(name: string, value: unknown): Promise<void> {
-    return new Promise((resolve) => {
+    return new Promise((resolve, reject) => {
       const wireName = toFoxgloveParamName(name);
-      const requestId = `param_set_${Date.now()}_${Math.random()}`;
-      this.pendingParamRequests.set(requestId, () => resolve());
+      const requestId = `param_set_${this.nextParamRequestId++}`;
+      this.pendingParamRequests.set(requestId, {
+        onValues: () => resolve(),
+        onClose: () =>
+          reject(new Error(`setParam(${name}): WebSocket closed before response`))
+      });
       this.protocol.setParameters([{ name: wireName, value }], requestId);
     });
   }
@@ -363,7 +440,7 @@ export class Ros {
       this.emit("connection");
     });
 
-    this.protocol.on("close", (_event: CloseEvent) => {
+    this.protocol.on("close", () => {
       this.isConnected = false;
       this.channels.clear();
       this.channelsByTopic.clear();
@@ -372,6 +449,10 @@ export class Ros {
       this.subscriptions.clear();
       this.subscriptionsByTopic.clear();
       this.clientChannels.clear();
+      // Bound long-session growth and avoid decoding against a stale schema
+      // if the server's definition changes across a reconnect.
+      this.readerCache.clear();
+      this.writerCache.clear();
 
       // Reject any in-flight service calls and parameter requests so their
       // promises don't hang forever across a disconnect.
@@ -385,9 +466,9 @@ export class Ros {
       }
       this.pendingServiceCalls.clear();
 
-      for (const handler of this.pendingParamRequests.values()) {
+      for (const pending of this.pendingParamRequests.values()) {
         try {
-          handler([]);
+          pending.onClose();
         } catch (e) {
           console.warn("Error completing pending param request on close:", e);
         }
@@ -399,8 +480,10 @@ export class Ros {
       this.emit("close");
     });
 
-    this.protocol.on("error", (_event: Event) => {
-      this.emit("error");
+    this.protocol.on("error", () => {
+      // Browser WebSocket error events carry no detail; reason codes come
+      // from the close event that follows.
+      this.emit("error", new Error("Foxglove WebSocket error"));
     });
 
     this.protocol.on("advertise", (channels: FoxgloveChannel[]) => {
@@ -475,11 +558,22 @@ export class Ros {
       }
     });
 
+    // foxglove_bridge emits this when a service handler raises, the service
+    // gets unadvertised mid-call, or the request payload is rejected. Without
+    // this branch the corresponding pending Promise would hang forever — the
+    // legacy roslib path raised an explicit error callback in the same shape.
+    this.protocol.on("serviceCallFailure", (failure: ServiceCallFailure) => {
+      const pending = this.pendingServiceCalls.get(failure.callId);
+      if (!pending) return;
+      this.pendingServiceCalls.delete(failure.callId);
+      pending.reject(new Error(failure.message));
+    });
+
     this.protocol.on("parameterValues", (id: string, params: ParameterValue[]) => {
-      const handler = this.pendingParamRequests.get(id);
-      if (handler) {
+      const pending = this.pendingParamRequests.get(id);
+      if (pending) {
         this.pendingParamRequests.delete(id);
-        handler(params);
+        pending.onValues(params);
       }
     });
   }
@@ -504,7 +598,7 @@ export class Ros {
   }
 
   private getReader(schemaName: string, schema: string): MessageReader {
-    const key = `${schemaName}:${schema.length}`;
+    const key = `${normalizeRosType(schemaName, "msg")} ${schema}`;
     let reader = this.readerCache.get(key);
     if (!reader) {
       reader = new MessageReader(parseRosMsgDefinition(schema, { ros2: true }));
@@ -514,7 +608,7 @@ export class Ros {
   }
 
   private getWriter(schemaName: string, schema: string): MessageWriter {
-    const key = `${schemaName}:${schema.length}`;
+    const key = `${normalizeRosType(schemaName, "msg")} ${schema}`;
     let writer = this.writerCache.get(key);
     if (!writer) {
       writer = new MessageWriter(parseRosMsgDefinition(schema, { ros2: true }));

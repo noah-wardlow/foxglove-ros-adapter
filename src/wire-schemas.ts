@@ -87,6 +87,16 @@ const statusMessageSchema = z.object({
   msg: z.string().optional()
 });
 
+// foxglove_bridge emits this when a service handler raises, when the service
+// has been unadvertised mid-call, or when the request payload is rejected.
+// Without it the pending call would hang forever.
+const serviceCallFailureMessageSchema = z.object({
+  op: z.literal("serviceCallFailure"),
+  serviceId: z.number(),
+  callId: z.number(),
+  message: z.string().optional()
+});
+
 /**
  * Discriminated union of every server→client text message we handle. Any
  * other `op` the server sends is tolerated silently (parsed as the `ignored`
@@ -100,5 +110,6 @@ export const serverMessageSchema = z.discriminatedUnion("op", [
   advertiseServicesMessageSchema,
   unadvertiseServicesMessageSchema,
   parameterValuesMessageSchema,
-  statusMessageSchema
+  statusMessageSchema,
+  serviceCallFailureMessageSchema
 ]);
