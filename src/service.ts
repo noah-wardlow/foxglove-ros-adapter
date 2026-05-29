@@ -7,23 +7,36 @@
  * removed now that no caller depends on them.
  */
 
+import type { z } from "zod";
+
 import { Ros } from "./ros";
 
-export interface ServiceOptions {
+type ServiceResponseCallback<T = unknown> = {
+  bivarianceHack(response: T): void;
+}["bivarianceHack"];
+
+export interface ServiceOptions<TResp = unknown> {
   ros: Ros;
   name: string;
   serviceType: string;
+  /**
+   * Optional runtime validator for decoded responses. When supplied, success
+   * callbacks receive only values that have passed this schema.
+   */
+  responseSchema?: z.ZodType<TResp>;
 }
 
 export class Service<TReq = unknown, TResp = unknown> {
   ros: Ros;
   name: string;
   serviceType: string;
+  private readonly responseSchema: z.ZodType<TResp> | undefined;
 
-  constructor(options: ServiceOptions) {
+  constructor(options: ServiceOptions<TResp>) {
     this.ros = options.ros;
     this.name = options.name;
     this.serviceType = options.serviceType;
+    this.responseSchema = options.responseSchema;
   }
 
   /**
@@ -31,15 +44,18 @@ export class Service<TReq = unknown, TResp = unknown> {
    */
   callService(
     request: TReq,
-    onSuccess?: (response: TResp) => void,
+    onSuccess?: ServiceResponseCallback<TResp>,
     onError?: (error: string) => void
   ): void {
+    const responseSchema = this.responseSchema;
+    const deliver: ServiceResponseCallback | undefined =
+      onSuccess && responseSchema
+        ? (response) => onSuccess(responseSchema.parse(response))
+        : onSuccess;
+
     this.ros
       .callService(this.name, this.serviceType, request)
-      .then((response) => {
-        // eslint-disable-next-line @typescript-eslint/consistent-type-assertions -- Roslib-API boundary: `TResp` is a caller-supplied nominal type; the CDR reader delivers `Record<string, unknown>` whose shape already matches `TResp` at runtime because the service schema drove the decode.
-        onSuccess?.(response as TResp);
-      })
+      .then((response) => deliver?.(response))
       .catch((err) => {
         const msg = err instanceof Error ? err.message : String(err);
         onError?.(msg);

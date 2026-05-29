@@ -124,7 +124,7 @@ export class ROS2TFClient {
     this.ros.subscribeTopic("/tf_static", "tf2_msgs/msg/TFMessage", this.tfStaticSub);
   }
 
-  private dispatchTFMessage(msg: Record<string, unknown>): void {
+  private dispatchTFMessage(msg: unknown): void {
     const parsed = tfMessageSchema.safeParse(msg);
     if (parsed.success) this.handleTFMessage(parsed.data);
   }

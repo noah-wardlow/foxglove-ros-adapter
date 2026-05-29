@@ -5,12 +5,19 @@
  * Internally delegates to the Ros class which manages foxglove subscriptions.
  */
 
+import type { z } from "zod";
+
 import { Ros, type MessageCallback } from "./ros";
 
-export interface TopicOptions {
+export interface TopicOptions<T = unknown> {
   ros: Ros;
   name: string;
   messageType: string;
+  /**
+   * Optional runtime validator for decoded messages. When supplied, subscribed
+   * callbacks receive only values that have passed this schema.
+   */
+  messageSchema?: z.ZodType<T>;
   /**
    * Minimum milliseconds between delivered messages. Matches rosbridge's
    * `throttle_rate`: leading-edge fire, no trailing catch-up. Enforced client-side
@@ -35,6 +42,7 @@ export class Topic<T = Record<string, unknown>> {
   ros: Ros;
   name: string;
   messageType: string;
+  private readonly messageSchema: z.ZodType<T> | undefined;
 
   /**
    * Throttle window in ms. `0` disables throttling — in that case `subscribe`
@@ -52,10 +60,11 @@ export class Topic<T = Record<string, unknown>> {
    */
   private readonly wrappedCallbacks = new Map<object, MessageCallback>();
 
-  constructor(options: TopicOptions) {
+  constructor(options: TopicOptions<T>) {
     this.ros = options.ros;
     this.name = options.name;
     this.messageType = options.messageType;
+    this.messageSchema = options.messageSchema;
     // Non-finite / negative / zero → no throttling.
     const rate = options.throttle_rate ?? 0;
     this.throttleMs = Number.isFinite(rate) && rate > 0 ? rate : 0;
@@ -80,21 +89,23 @@ export class Topic<T = Record<string, unknown>> {
     this.ros.unpublishTopic(this.name);
   }
 
-  subscribe(callback: (message: T) => void): void {
+  subscribe(callback: MessageCallback<T>): void {
     if (this.wrappedCallbacks.has(callback)) {
       // Idempotent: subscribing the same callback twice is a no-op rather
       // than a silent leak of the prior wrapped registration.
       return;
     }
 
-    // eslint-disable-next-line @typescript-eslint/consistent-type-assertions -- Roslib-API boundary: `T` is a caller-supplied nominal type for the decoded ROS message; the CDR reader delivers `Record<string, unknown>` whose shape already matches `T` at runtime because the ROS schema drove the decode.
-    const cast = callback as MessageCallback;
+    const messageSchema = this.messageSchema;
+    const deliver: MessageCallback = messageSchema
+      ? (msg) => callback(messageSchema.parse(msg))
+      : callback;
 
     let wrappedCb: MessageCallback;
     if (this.throttleMs === 0) {
       // Fast path: no throttle requested. Register the user callback directly so
       // the hot path costs nothing beyond the existing Ros-level fan-out.
-      wrappedCb = cast;
+      wrappedCb = deliver;
     } else {
       // Leading-edge throttle. `lastFiredAt` lives in the closure (one slot per
       // subscription) so there is no Map lookup, Set access, or object
@@ -107,7 +118,7 @@ export class Topic<T = Record<string, unknown>> {
         const now = performance.now();
         if (now - lastFiredAt < windowMs) return;
         lastFiredAt = now;
-        cast(msg);
+        deliver(msg);
       };
     }
 
@@ -115,7 +126,7 @@ export class Topic<T = Record<string, unknown>> {
     this.ros.subscribeTopic(this.name, this.messageType, wrappedCb);
   }
 
-  unsubscribe(callback?: (message: T) => void): void {
+  unsubscribe(callback?: MessageCallback<T>): void {
     if (callback) {
       const wrapped = this.wrappedCallbacks.get(callback);
       if (wrapped) {

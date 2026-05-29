@@ -23,10 +23,11 @@ type RosEventName = "connection" | "error" | "close";
 // without the caller having to widen `e` to `unknown` and narrow back.
 type RosLifecycleCallback = () => void;
 type RosErrorCallback = (error: Error) => void;
-type RosCallback = RosLifecycleCallback | RosErrorCallback;
 
 /** Callback for incoming topic messages (deserialized to JS objects). */
-export type MessageCallback = (message: Record<string, unknown>) => void;
+export type MessageCallback<T = unknown> = {
+  bivarianceHack(message: T): void;
+}["bivarianceHack"];
 
 /**
  * Normalize a ROS message/service type string to canonical `pkg/msg/Name` or
@@ -94,7 +95,9 @@ interface ClientChannel {
 
 export class Ros {
   private readonly protocol = new FoxgloveProtocolClient();
-  private readonly eventListeners = new Map<RosEventName, Set<RosCallback>>();
+  private readonly connectionListeners = new Set<RosLifecycleCallback>();
+  private readonly closeListeners = new Set<RosLifecycleCallback>();
+  private readonly errorListeners = new Set<RosErrorCallback>();
 
   // Channel/service registries populated by foxglove_bridge advertisements
   private readonly channels = new Map<number, FoxgloveChannel>(); // channelId → channel
@@ -154,19 +157,44 @@ export class Ros {
 
   on(event: "error", callback: RosErrorCallback): void;
   on(event: "connection" | "close", callback: RosLifecycleCallback): void;
-  on(event: RosEventName, callback: RosCallback): void {
-    let set = this.eventListeners.get(event);
-    if (!set) {
-      set = new Set();
-      this.eventListeners.set(event, set);
+  on(
+    ...args:
+      | [event: "error", callback: RosErrorCallback]
+      | [event: "connection" | "close", callback: RosLifecycleCallback]
+  ): void {
+    const [event, callback] = args;
+    switch (event) {
+      case "connection":
+        this.connectionListeners.add(callback);
+        break;
+      case "close":
+        this.closeListeners.add(callback);
+        break;
+      case "error":
+        this.errorListeners.add(callback);
+        break;
     }
-    set.add(callback);
   }
 
   off(event: "error", callback: RosErrorCallback): void;
   off(event: "connection" | "close", callback: RosLifecycleCallback): void;
-  off(event: RosEventName, callback: RosCallback): void {
-    this.eventListeners.get(event)?.delete(callback);
+  off(
+    ...args:
+      | [event: "error", callback: RosErrorCallback]
+      | [event: "connection" | "close", callback: RosLifecycleCallback]
+  ): void {
+    const [event, callback] = args;
+    switch (event) {
+      case "connection":
+        this.connectionListeners.delete(callback);
+        break;
+      case "close":
+        this.closeListeners.delete(callback);
+        break;
+      case "error":
+        this.errorListeners.delete(callback);
+        break;
+    }
   }
 
   /**
@@ -174,32 +202,61 @@ export class Ros {
    * module-level mock Ros between cases; production code does not call it.
    */
   removeAllListeners(event?: RosEventName): void {
-    if (event) {
-      this.eventListeners.get(event)?.clear();
-    } else {
-      for (const set of this.eventListeners.values()) {
-        set.clear();
-      }
+    if (event === undefined) {
+      this.connectionListeners.clear();
+      this.closeListeners.clear();
+      this.errorListeners.clear();
+      return;
+    }
+
+    switch (event) {
+      case "connection":
+        this.connectionListeners.clear();
+        break;
+      case "close":
+        this.closeListeners.clear();
+        break;
+      case "error":
+        this.errorListeners.clear();
+        break;
     }
   }
 
   emit(event: "error", error: Error): void;
   emit(event: "connection" | "close"): void;
   emit(event: RosEventName, error?: Error): void {
-    const set = this.eventListeners.get(event);
-    if (!set) return;
-    // Per-event Sets are homogeneous by the on() overloads (error → RosErrorCallback,
-    // connection/close → RosLifecycleCallback), so the variadic call is structurally
-    // safe at runtime even though TypeScript can't narrow the union at this point.
-    const payload =
-      event === "error"
-        ? [error ?? new Error("ros emit('error') called without an error")]
-        : [];
-    for (const cb of set) {
+    switch (event) {
+      case "connection":
+        this.emitLifecycle("connection", this.connectionListeners);
+        break;
+      case "close":
+        this.emitLifecycle("close", this.closeListeners);
+        break;
+      case "error":
+        this.emitError(error ?? new Error("ros emit('error') called without an error"));
+        break;
+    }
+  }
+
+  private emitLifecycle(
+    event: "connection" | "close",
+    listeners: Set<RosLifecycleCallback>
+  ): void {
+    for (const cb of listeners) {
       try {
-        (cb as (...args: unknown[]) => void)(...payload); // eslint-disable-line @typescript-eslint/consistent-type-assertions -- see comment above; widening the dispatch type is the only way to call a union of arities without per-call narrowing.
+        cb();
       } catch (e) {
         console.warn(`Error in Ros "${event}" handler:`, e);
+      }
+    }
+  }
+
+  private emitError(error: Error): void {
+    for (const cb of this.errorListeners) {
+      try {
+        cb(error);
+      } catch (e) {
+        console.warn('Error in Ros "error" handler:', e);
       }
     }
   }
