@@ -9,8 +9,8 @@ but you get CDR-native messages over the actively-maintained Foxglove bridge.
 
 ## Why
 
-- `roslibjs` targets `rosbridge_server`, which is deprecated for ROS 2 and suffers JSON-encoding overhead
-  on every message.
+- `roslibjs` targets `rosbridge_server`, which speaks the rosbridge JSON protocol and pays
+  JSON-encoding overhead on every message.
 - `foxglove_bridge` is the recommended ROS 2 web bridge and uses binary CDR framing natively.
 - Rewriting every `new Ros()` / `new Topic()` call site in a large app is painful.
 
