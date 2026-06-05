@@ -31,7 +31,8 @@
       "types": "./dist/index.d.ts",
       "import": "./dist/index.js",
       "require": "./dist/index.cjs"
-    }
+    },
+    "./package.json": "./package.json"
   },
   "files": [
     "dist",
@@ -43,9 +44,14 @@
   "scripts": {
     "build": "tsup",
     "clean": "rm -rf dist",
+    "release": "semantic-release",
     "test": "vitest run",
     "typecheck": "tsc --noEmit",
     "prepublishOnly": "pnpm run clean && pnpm run typecheck && pnpm run build"
+  },
+  "publishConfig": {
+    "access": "public",
+    "provenance": true
   },
   "peerDependencies": {
     "@foxglove/rosmsg": "^5.0.0",
@@ -55,7 +61,10 @@
   "devDependencies": {
     "@foxglove/rosmsg": "^5.0.5",
     "@foxglove/rosmsg2-serialization": "^3.0.3",
+    "@semantic-release/changelog": "^6.0.3",
+    "@semantic-release/git": "^10.0.1",
     "@types/node": "^20.11.0",
+    "semantic-release": "^25.0.3",
     "tsup": "^8.0.0",
     "typescript": "^5.4.0",
     "vitest": "^4.1.0",

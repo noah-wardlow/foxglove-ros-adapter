@@ -1,9 +1,10 @@
-src/
 tsconfig.json
 tsup.config.ts
 .github/
+.releaserc*
 .gitignore
 .prettierrc
 .eslintrc*
+test/
 *.tsbuildinfo
 coverage/
