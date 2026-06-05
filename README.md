@@ -55,6 +55,19 @@ const jointStates = new Topic({
 jointStates.subscribe((msg) => console.log(msg));
 ```
 
+Optional runtime validation:
+
+```ts
+import { z } from "zod";
+
+const stringTopic = new Topic({
+  ros,
+  name: "/status",
+  messageType: "std_msgs/msg/String",
+  messageSchema: z.object({ data: z.string() })
+});
+```
+
 ### As a drop-in alias for `roslib`
 
 If your codebase imports from `"roslib"` in many places, alias the module at build time:
@@ -92,10 +105,12 @@ Now every `import { Topic } from "roslib"` resolves to this adapter with zero so
 ## What's supported
 
 - `new Ros({ url })` — connect, `on("connection" | "close" | "error")`, `close()`, `getTopicsForType()`
-- `new Topic({ ros, name, messageType })` — `subscribe()`, `unsubscribe()`, `publish()`
+- `new Topic({ ros, name, messageType, messageSchema? })` — `subscribe()`, `unsubscribe()`,
+  `publish()`
 - `new Service({ ros, name, serviceType })` — `callService()` (callback API)
 - `new Param({ ros, name })` — `get()`, `set()`
-- `new ROS2TFClient({ ros, fixedFrame })` — `subscribe(frameId, cb)`, `unsubscribe()`
+- `new ROS2TFClient({ ros, fixedFrame })` — `subscribe(frameId, cb)`, `unsubscribe()`,
+  `getFrameIds()`, `addFramesListener(cb)`, `removeFramesListener(cb)`
 - Both `foxglove.sdk.v1` (ros-humble-foxglove-bridge 3.2.x / foxglove-sdk-cpp) and legacy
   `foxglove.websocket.v1` subprotocols are advertised on the handshake.
 
@@ -109,6 +124,8 @@ Now every `import { Topic } from "roslib"` resolves to this adapter with zero so
 - `throttle_rate` is enforced **client-side** (leading-edge, minimum ms between delivered messages)
   since `foxglove_bridge` has no per-subscription rate limiter. When unset or `0`, the subscribe path
   registers the user callback directly — no wrapper, no clock read, no branch per message.
+- `messageSchema` on `Topic` is adapter-specific and optional. When supplied, decoded messages are
+  parsed with the provided Zod schema before subscriber callbacks run.
 - `compression`, `queue_size`, `queue_length`, `latch`, `reconnect_on_close` options on `Topic` are
   accepted for API compatibility but ignored; `foxglove_bridge` negotiates transport concerns on its
   own.
@@ -127,9 +144,15 @@ Now every `import { Topic } from "roslib"` resolves to this adapter with zero so
 ## TF resolution
 
 `ROS2TFClient` subscribes to `/tf` and `/tf_static`, builds a parent→child transform graph, and
-resolves `fixedFrame → frameId` by composing transforms along the chain. Cycles in the tree return
-`null` rather than crashing, and subscribers receive an updated transform any time a link in their
-chain changes.
+resolves `fixedFrame → frameId` across any connected frames by walking both sides to their lowest
+common ancestor, matching RViz-style sibling and ancestor lookups. Cycles in the tree return `null`
+rather than crashing, non-unit quaternions are normalized at the subscription edge, and subscribers
+receive an updated transform any time a link in their chain changes.
+
+`rate` on `ROS2TFClient` limits `/tf` processing client-side in Hz. `/tf_static` is never throttled
+because static transforms are latched and should not be dropped. `getFrameIds()` and
+`addFramesListener()` expose the sorted set of parent and child frames seen so far for frame-selection
+UIs.
 
 ## License
 

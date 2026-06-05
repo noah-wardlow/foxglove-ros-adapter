@@ -43,6 +43,21 @@ export class Transform {
   }
 
   /**
+   * Invert a rigid transform: if `this` is a→b, the result is b→a. For a unit
+   * quaternion the inverse rotation is its conjugate, and the inverse
+   * translation is that conjugate applied to the negated translation.
+   */
+  inverse(): Transform {
+    const r = this.rotation;
+    const invRotation = new Quaternion({ x: -r.x, y: -r.y, z: -r.z, w: r.w });
+    const rotated = rotateVectorByQuaternion(this.translation, invRotation);
+    return new Transform({
+      translation: new Vector3({ x: -rotated.x, y: -rotated.y, z: -rotated.z }),
+      rotation: invRotation
+    });
+  }
+
+  /**
    * Compose two rigid transforms: `this` (a→b) composed with `other` (b→c)
    * yields the transform from a→c.
    */
