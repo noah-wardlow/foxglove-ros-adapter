@@ -1,5 +1,7 @@
 # foxglove-ros-adapter
 
+[npm package](https://www.npmjs.com/package/foxglove-ros-adapter)
+
 A drop-in replacement for [`roslib`](https://github.com/RobotWebTools/roslibjs) that speaks the
 [Foxglove WebSocket protocol](https://github.com/foxglove/ws-protocol) to
 [`foxglove_bridge`](https://github.com/foxglove/ros-foxglove-bridge) instead of `rosbridge_server`.
