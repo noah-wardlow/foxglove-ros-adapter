@@ -17,7 +17,7 @@ import {
 } from "./protocol";
 import type { FoxgloveChannel, FoxgloveService } from "./types";
 
-type RosEventName = "connection" | "error" | "close";
+type RosEventName = "connection" | "error" | "close" | "channelsChanged";
 // roslib emits "connection" / "close" with no args and "error" with an Error.
 // Split callback types so each `on()` overload type-checks at the call site
 // without the caller having to widen `e` to `unknown` and narrow back.
@@ -97,6 +97,7 @@ export class Ros {
   private readonly protocol = new FoxgloveProtocolClient();
   private readonly connectionListeners = new Set<RosLifecycleCallback>();
   private readonly closeListeners = new Set<RosLifecycleCallback>();
+  private readonly channelsChangedListeners = new Set<RosLifecycleCallback>();
   private readonly errorListeners = new Set<RosErrorCallback>();
 
   // Channel/service registries populated by foxglove_bridge advertisements
@@ -156,11 +157,17 @@ export class Ros {
   }
 
   on(event: "error", callback: RosErrorCallback): void;
-  on(event: "connection" | "close", callback: RosLifecycleCallback): void;
+  on(
+    event: "connection" | "close" | "channelsChanged",
+    callback: RosLifecycleCallback
+  ): void;
   on(
     ...args:
       | [event: "error", callback: RosErrorCallback]
-      | [event: "connection" | "close", callback: RosLifecycleCallback]
+      | [
+          event: "connection" | "close" | "channelsChanged",
+          callback: RosLifecycleCallback
+        ]
   ): void {
     const [event, callback] = args;
     switch (event) {
@@ -170,6 +177,9 @@ export class Ros {
       case "close":
         this.closeListeners.add(callback);
         break;
+      case "channelsChanged":
+        this.channelsChangedListeners.add(callback);
+        break;
       case "error":
         this.errorListeners.add(callback);
         break;
@@ -177,11 +187,17 @@ export class Ros {
   }
 
   off(event: "error", callback: RosErrorCallback): void;
-  off(event: "connection" | "close", callback: RosLifecycleCallback): void;
+  off(
+    event: "connection" | "close" | "channelsChanged",
+    callback: RosLifecycleCallback
+  ): void;
   off(
     ...args:
       | [event: "error", callback: RosErrorCallback]
-      | [event: "connection" | "close", callback: RosLifecycleCallback]
+      | [
+          event: "connection" | "close" | "channelsChanged",
+          callback: RosLifecycleCallback
+        ]
   ): void {
     const [event, callback] = args;
     switch (event) {
@@ -190,6 +206,9 @@ export class Ros {
         break;
       case "close":
         this.closeListeners.delete(callback);
+        break;
+      case "channelsChanged":
+        this.channelsChangedListeners.delete(callback);
         break;
       case "error":
         this.errorListeners.delete(callback);
@@ -205,6 +224,7 @@ export class Ros {
     if (event === undefined) {
       this.connectionListeners.clear();
       this.closeListeners.clear();
+      this.channelsChangedListeners.clear();
       this.errorListeners.clear();
       return;
     }
@@ -216,6 +236,9 @@ export class Ros {
       case "close":
         this.closeListeners.clear();
         break;
+      case "channelsChanged":
+        this.channelsChangedListeners.clear();
+        break;
       case "error":
         this.errorListeners.clear();
         break;
@@ -223,7 +246,7 @@ export class Ros {
   }
 
   emit(event: "error", error: Error): void;
-  emit(event: "connection" | "close"): void;
+  emit(event: "connection" | "close" | "channelsChanged"): void;
   emit(event: RosEventName, error?: Error): void {
     switch (event) {
       case "connection":
@@ -232,6 +255,9 @@ export class Ros {
       case "close":
         this.emitLifecycle("close", this.closeListeners);
         break;
+      case "channelsChanged":
+        this.emitLifecycle("channelsChanged", this.channelsChangedListeners);
+        break;
       case "error":
         this.emitError(error ?? new Error("ros emit('error') called without an error"));
         break;
@@ -239,7 +265,7 @@ export class Ros {
   }
 
   private emitLifecycle(
-    event: "connection" | "close",
+    event: "connection" | "close" | "channelsChanged",
     listeners: Set<RosLifecycleCallback>
   ): void {
     for (const cb of listeners) {
@@ -534,6 +560,7 @@ export class Ros {
 
       this.pendingSubscribers.length = 0;
 
+      this.emit("channelsChanged");
       this.emit("close");
     });
 
@@ -550,6 +577,7 @@ export class Ros {
       }
       // Process pending subscribers that were waiting for these channels
       this.processPendingSubscribers();
+      this.emit("channelsChanged");
     });
 
     this.protocol.on("unadvertise", (channelIds: number[]) => {
@@ -560,6 +588,7 @@ export class Ros {
           this.channels.delete(id);
         }
       }
+      this.emit("channelsChanged");
     });
 
     this.protocol.on("advertiseServices", (svcs: FoxgloveService[]) => {

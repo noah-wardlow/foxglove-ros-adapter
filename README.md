@@ -47,6 +47,9 @@ const ros = new Ros({ url: "ws://localhost:8765" });
 
 ros.on("connection", () => console.log("connected"));
 ros.on("close", () => console.log("disconnected"));
+ros.on("channelsChanged", () => {
+  ros.getTopicsForType("sensor_msgs/msg/JointState", (topics) => console.log(topics));
+});
 
 const jointStates = new Topic({
   ros,
@@ -106,7 +109,9 @@ Now every `import { Topic } from "roslib"` resolves to this adapter with zero so
 
 ## What's supported
 
-- `new Ros({ url })` — connect, `on("connection" | "close" | "error")`, `close()`, `getTopicsForType()`
+- `new Ros({ url })` — connect,
+  `on("connection" | "close" | "error" | "channelsChanged")`, `close()`,
+  `getTopicsForType()`
 - `new Topic({ ros, name, messageType, messageSchema? })` — `subscribe()`, `unsubscribe()`,
   `publish()`
 - `new Service({ ros, name, serviceType })` — `callService()` (callback API)
