@@ -41,7 +41,7 @@ pnpm add zod @foxglove/rosmsg @foxglove/rosmsg2-serialization
 ### As a direct import
 
 ```ts
-import { Ros, Topic, Service } from "foxglove-ros-adapter";
+import { ActionClient, Ros, Topic, Service } from "foxglove-ros-adapter";
 
 const ros = new Ros({ url: "ws://localhost:8765" });
 
@@ -110,22 +110,65 @@ Now every `import { Topic } from "roslib"` resolves to this adapter with zero so
 ## What's supported
 
 - `new Ros({ url })` — connect,
-  `on("connection" | "close" | "error" | "channelsChanged")`, `close()`,
-  `getTopicsForType()`
+  `on("connection" | "close" | "error" | "channelsChanged" | "servicesChanged")`,
+  `close()`, `getTopicsForType()`, `getActionServers()`, `waitForAction()`
 - `new Topic({ ros, name, messageType, messageSchema? })` — `subscribe()`, `unsubscribe()`,
   `publish()`
 - `new Service({ ros, name, serviceType })` — `callService()` (callback API)
+- `new ActionClient({ ros, name, actionType })` — `sendGoal()`, `cancelGoal()`, `waitGoal()`
 - `new Param({ ros, name })` — `get()`, `set()`
 - `new ROS2TFClient({ ros, fixedFrame })` — `subscribe(frameId, cb)`, `unsubscribe()`,
   `getFrameIds()`, `addFramesListener(cb)`, `removeFramesListener(cb)`
 - Both `foxglove.sdk.v1` (ros-humble-foxglove-bridge 3.2.x / foxglove-sdk-cpp) and legacy
   `foxglove.websocket.v1` subprotocols are advertised on the handshake.
 
+## Actions
+
+Foxglove Bridge exposes ROS 2 actions through the standard hidden action
+services and feedback topic when the bridge is launched with hidden entities
+enabled:
+
+```bash
+ros2 launch foxglove_bridge foxglove_bridge_launch.xml include_hidden:=true
+```
+
+The adapter maps action goals to:
+
+- `<action>/_action/send_goal`
+- `<action>/_action/get_result`
+- `<action>/_action/cancel_goal`
+- `<action>/_action/feedback`
+
+```ts
+const client = new ActionClient({
+  ros,
+  name: "/fibonacci",
+  actionType: "example_interfaces/action/Fibonacci"
+});
+
+await ros.waitForAction("/fibonacci", 5000, { requireFeedback: true });
+
+const goalId = client.sendGoal(
+  { order: 5 },
+  (result) => console.log(result.status, result.values),
+  (feedback) => console.log(feedback.values),
+  (error) => console.error(error)
+);
+
+await client.waitGoal(goalId, 30_000);
+```
+
+Some bridges advertise action request/result schemas with the action payload
+flattened into the service message instead of nested under `goal` or `result`.
+The adapter detects the advertised schema and serializes the request shape the
+bridge expects.
+
 ## What's different from `roslib`
 
 - Client-side **service advertising** is not supported — `foxglove_bridge` only exposes server-side
-  services. The `actionlib` / `ActionClient` APIs are not provided (actions are exposed as services by
-  `foxglove_bridge`, so wrap a goal service + feedback topic yourself if you need them).
+  services.
+- ROS 2 actions require `foxglove_bridge` to advertise hidden entities. If `include_hidden` is not
+  enabled, action endpoint checks and goal sends report the missing hidden services/topics.
 - `Topic#advertise()` / `Topic#unadvertise()` are accepted but are no-ops — the adapter advertises
   lazily on first `publish()`.
 - `throttle_rate` is enforced **client-side** (leading-edge, minimum ms between delivered messages)

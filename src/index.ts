@@ -13,6 +13,8 @@
 export { Ros } from "./ros";
 export { Topic } from "./topic";
 export { Service } from "./service";
+export { ActionClient } from "./action-client";
 export { Param } from "./param";
 export { ROS2TFClient } from "./tf-client";
-export { Transform, Vector3, Quaternion } from "./types";
+export { GoalStatus, Transform, Vector3, Quaternion } from "./types";
+export type { ActionFeedback, ActionResult } from "./types";

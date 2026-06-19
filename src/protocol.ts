@@ -115,7 +115,15 @@ export class FoxgloveProtocolClient {
     this.ws = null;
     // Fire close synchronously before suppressing the socket's onclose, so
     // reconnect doesn't silently drop the prior session's close event.
-    this.dispatch(this.handlers.close, (h) => h(new CloseEvent("close")), "close");
+    const closeEvent =
+      typeof CloseEvent === "function"
+        ? new CloseEvent("close")
+        : ({
+            code: 1000,
+            reason: "",
+            wasClean: true
+          } as CloseEvent);
+    this.dispatch(this.handlers.close, (h) => h(closeEvent), "close");
 
     ws.onopen = null;
     ws.onclose = null;

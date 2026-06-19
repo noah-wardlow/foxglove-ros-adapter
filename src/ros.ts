@@ -15,9 +15,14 @@ import {
   type ServiceCallFailure,
   type ParameterValue
 } from "./protocol";
-import type { FoxgloveChannel, FoxgloveService } from "./types";
+import type { ActionFeedback, ActionResult, FoxgloveChannel, FoxgloveService } from "./types";
 
-type RosEventName = "connection" | "error" | "close" | "channelsChanged";
+type RosEventName =
+  | "connection"
+  | "error"
+  | "close"
+  | "channelsChanged"
+  | "servicesChanged";
 // roslib emits "connection" / "close" with no args and "error" with an Error.
 // Split callback types so each `on()` overload type-checks at the call site
 // without the caller having to widen `e` to `unknown` and narrow back.
@@ -36,9 +41,12 @@ export type MessageCallback<T = unknown> = {
  *   - ROS 1 style (`std_msgs/String` → `std_msgs/msg/String`)
  *   - already-canonical forms (left untouched)
  */
-function normalizeRosType(type: string, kind: "msg" | "srv" = "msg"): string {
+function normalizeRosType(
+  type: string,
+  kind: "msg" | "srv" | "action" = "msg"
+): string {
   const trimmed = type.replace(/^\/+/, "");
-  if (trimmed.includes(`/${kind}/`)) {
+  if (/\/(?:msg|srv|action)\//.test(trimmed)) {
     return trimmed;
   }
   const slash = trimmed.indexOf("/");
@@ -54,6 +62,98 @@ function normalizeRosType(type: string, kind: "msg" | "srv" = "msg"): string {
  */
 function toFoxgloveParamName(name: string): string {
   return name.replaceAll(":", ".");
+}
+
+function actionEndpoint(actionName: string, leaf: string): string {
+  return `${requireActionName(actionName).replace(/\/+$/, "")}/_action/${leaf}`;
+}
+
+function requireActionName(actionName: string): string {
+  const trimmed = actionName.trim();
+  if (!trimmed) {
+    throw new Error("Action name must be a non-empty ROS action name");
+  }
+  return trimmed;
+}
+
+function serviceRequestSchema(svc: FoxgloveService): string {
+  return svc.request?.schema ?? svc.requestSchema ?? "";
+}
+
+function serviceResponseSchema(svc: FoxgloveService): string {
+  return svc.response?.schema ?? svc.responseSchema ?? "";
+}
+
+function firstSchemaFieldNames(schema: string): Set<string> {
+  if (!schema) return new Set();
+  return new Set(
+    parseRosMsgDefinition(schema, { ros2: true })[0]?.definitions
+      .filter((field) => !field.isConstant)
+      .flatMap((field) => (field.name ? [field.name] : []))
+  );
+}
+
+function goalIdToUuidBytes(goalId: string): number[] {
+  const hex = goalId.replace(/-/g, "");
+  if (/^[0-9a-fA-F]{32}$/.test(hex)) {
+    const bytes: number[] = [];
+    for (let i = 0; i < 32; i += 2) {
+      bytes.push(Number.parseInt(hex.slice(i, i + 2), 16));
+    }
+    return bytes;
+  }
+
+  // Deterministic fallback for roslib-style textual goal IDs. ROS only needs a
+  // stable 16-byte action UUID; generated ActionClient IDs are canonical UUIDs.
+  const bytes = new Uint8Array(16);
+  let h1 = 0x811c9dc5;
+  let h2 = 0x9e3779b9;
+  for (let i = 0; i < goalId.length; i += 1) {
+    const c = goalId.charCodeAt(i);
+    h1 ^= c;
+    h1 = Math.imul(h1, 0x01000193);
+    h2 ^= c + i;
+    h2 = Math.imul(h2, 0x85ebca6b);
+  }
+  const view = new DataView(bytes.buffer);
+  view.setUint32(0, h1, false);
+  view.setUint32(4, h2, false);
+  view.setUint32(8, Math.imul(h1 ^ h2, 0xc2b2ae35), false);
+  view.setUint32(12, Math.imul(h1 + h2, 0x27d4eb2d), false);
+  return Array.from(bytes);
+}
+
+function newGoalId(): string {
+  const cryptoLike = globalThis.crypto as Crypto | undefined;
+  if (cryptoLike?.randomUUID) return cryptoLike.randomUUID();
+
+  const bytes = new Uint8Array(16);
+  if (cryptoLike?.getRandomValues) {
+    cryptoLike.getRandomValues(bytes);
+  } else {
+    for (let i = 0; i < bytes.length; i += 1) {
+      bytes[i] = Math.floor(Math.random() * 256);
+    }
+  }
+  bytes[6] = (bytes[6]! & 0x0f) | 0x40;
+  bytes[8] = (bytes[8]! & 0x3f) | 0x80;
+  const hex = Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("");
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(
+    16,
+    20
+  )}-${hex.slice(20)}`;
+}
+
+function sameUuid(a: unknown, b: number[]): boolean {
+  const candidate =
+    typeof a === "object" && a !== null && "uuid" in a
+      ? (a as { uuid?: unknown }).uuid
+      : a;
+  const bytes =
+    Array.isArray(candidate) || candidate instanceof Uint8Array
+      ? Array.from(candidate)
+      : null;
+  return bytes?.length === 16 && bytes.every((value, index) => value === b[index]);
 }
 
 /** Pending service call awaiting a response. */
@@ -98,6 +198,7 @@ export class Ros {
   private readonly connectionListeners = new Set<RosLifecycleCallback>();
   private readonly closeListeners = new Set<RosLifecycleCallback>();
   private readonly channelsChangedListeners = new Set<RosLifecycleCallback>();
+  private readonly servicesChangedListeners = new Set<RosLifecycleCallback>();
   private readonly errorListeners = new Set<RosErrorCallback>();
 
   // Channel/service registries populated by foxglove_bridge advertisements
@@ -158,14 +259,14 @@ export class Ros {
 
   on(event: "error", callback: RosErrorCallback): void;
   on(
-    event: "connection" | "close" | "channelsChanged",
+    event: "connection" | "close" | "channelsChanged" | "servicesChanged",
     callback: RosLifecycleCallback
   ): void;
   on(
     ...args:
       | [event: "error", callback: RosErrorCallback]
       | [
-          event: "connection" | "close" | "channelsChanged",
+          event: "connection" | "close" | "channelsChanged" | "servicesChanged",
           callback: RosLifecycleCallback
         ]
   ): void {
@@ -180,6 +281,9 @@ export class Ros {
       case "channelsChanged":
         this.channelsChangedListeners.add(callback);
         break;
+      case "servicesChanged":
+        this.servicesChangedListeners.add(callback);
+        break;
       case "error":
         this.errorListeners.add(callback);
         break;
@@ -188,14 +292,14 @@ export class Ros {
 
   off(event: "error", callback: RosErrorCallback): void;
   off(
-    event: "connection" | "close" | "channelsChanged",
+    event: "connection" | "close" | "channelsChanged" | "servicesChanged",
     callback: RosLifecycleCallback
   ): void;
   off(
     ...args:
       | [event: "error", callback: RosErrorCallback]
       | [
-          event: "connection" | "close" | "channelsChanged",
+          event: "connection" | "close" | "channelsChanged" | "servicesChanged",
           callback: RosLifecycleCallback
         ]
   ): void {
@@ -209,6 +313,9 @@ export class Ros {
         break;
       case "channelsChanged":
         this.channelsChangedListeners.delete(callback);
+        break;
+      case "servicesChanged":
+        this.servicesChangedListeners.delete(callback);
         break;
       case "error":
         this.errorListeners.delete(callback);
@@ -225,6 +332,7 @@ export class Ros {
       this.connectionListeners.clear();
       this.closeListeners.clear();
       this.channelsChangedListeners.clear();
+      this.servicesChangedListeners.clear();
       this.errorListeners.clear();
       return;
     }
@@ -239,6 +347,9 @@ export class Ros {
       case "channelsChanged":
         this.channelsChangedListeners.clear();
         break;
+      case "servicesChanged":
+        this.servicesChangedListeners.clear();
+        break;
       case "error":
         this.errorListeners.clear();
         break;
@@ -246,7 +357,7 @@ export class Ros {
   }
 
   emit(event: "error", error: Error): void;
-  emit(event: "connection" | "close" | "channelsChanged"): void;
+  emit(event: "connection" | "close" | "channelsChanged" | "servicesChanged"): void;
   emit(event: RosEventName, error?: Error): void {
     switch (event) {
       case "connection":
@@ -258,6 +369,9 @@ export class Ros {
       case "channelsChanged":
         this.emitLifecycle("channelsChanged", this.channelsChangedListeners);
         break;
+      case "servicesChanged":
+        this.emitLifecycle("servicesChanged", this.servicesChangedListeners);
+        break;
       case "error":
         this.emitError(error ?? new Error("ros emit('error') called without an error"));
         break;
@@ -265,7 +379,7 @@ export class Ros {
   }
 
   private emitLifecycle(
-    event: "connection" | "close" | "channelsChanged",
+    event: "connection" | "close" | "channelsChanged" | "servicesChanged",
     listeners: Set<RosLifecycleCallback>
   ): void {
     for (const cb of listeners) {
@@ -295,6 +409,89 @@ export class Ros {
 
   getServiceByName(name: string): FoxgloveService | undefined {
     return this.servicesByName.get(name);
+  }
+
+  getActionServers(onSuccess: (actions: string[]) => void): void {
+    const suffix = "/_action/send_goal";
+    const actions = Array.from(this.servicesByName.keys())
+      .filter((name) => name.endsWith(suffix))
+      .map((name) => name.slice(0, -suffix.length))
+      .sort();
+    onSuccess(actions);
+  }
+
+  isServiceAdvertised(serviceName: string): boolean {
+    return this.servicesByName.has(serviceName);
+  }
+
+  getMissingActionEndpoints(
+    actionName: string,
+    options?: { requireFeedback?: boolean; requireCancel?: boolean }
+  ): string[] {
+    const missing: string[] = [];
+    for (const leaf of ["send_goal", "get_result"]) {
+      const service = actionEndpoint(actionName, leaf);
+      if (!this.servicesByName.has(service)) missing.push(service);
+    }
+
+    if (options?.requireCancel) {
+      const cancel = actionEndpoint(actionName, "cancel_goal");
+      if (!this.servicesByName.has(cancel)) missing.push(cancel);
+    }
+
+    if (options?.requireFeedback) {
+      const feedback = actionEndpoint(actionName, "feedback");
+      if (!this.channelsByTopic.has(feedback)) missing.push(feedback);
+    }
+
+    return missing;
+  }
+
+  isActionAdvertised(
+    actionName: string,
+    options?: { requireFeedback?: boolean; requireCancel?: boolean }
+  ): boolean {
+    return this.getMissingActionEndpoints(actionName, options).length === 0;
+  }
+
+  waitForService(serviceName: string, timeoutMs = 5000): Promise<boolean> {
+    if (this.isServiceAdvertised(serviceName)) return Promise.resolve(true);
+    return new Promise((resolve) => {
+      const check = () => {
+        if (this.isServiceAdvertised(serviceName)) done(true);
+      };
+      const done = (value: boolean) => {
+        clearTimeout(timeout);
+        this.off("servicesChanged", check);
+        resolve(value);
+      };
+      const timeout = setTimeout(done, timeoutMs, false);
+      this.on("servicesChanged", check);
+      check();
+    });
+  }
+
+  waitForAction(
+    actionName: string,
+    timeoutMs = 5000,
+    options?: { requireFeedback?: boolean; requireCancel?: boolean }
+  ): Promise<boolean> {
+    if (this.isActionAdvertised(actionName, options)) return Promise.resolve(true);
+    return new Promise((resolve) => {
+      const check = () => {
+        if (this.isActionAdvertised(actionName, options)) done(true);
+      };
+      const done = (value: boolean) => {
+        clearTimeout(timeout);
+        this.off("servicesChanged", check);
+        this.off("channelsChanged", check);
+        resolve(value);
+      };
+      const timeout = setTimeout(done, timeoutMs, false);
+      this.on("servicesChanged", check);
+      this.on("channelsChanged", check);
+      check();
+    });
   }
 
   /**
@@ -464,17 +661,17 @@ export class Ros {
       // Normalize so mixed caller formats (e.g. `pkg/Foo` vs `pkg/srv/Foo`)
       // produce the same cache keys. Prefer the sdk.v1 nested schema fields
       // and fall back to the legacy flat form for older bridges.
-      const canonicalType = normalizeRosType(serviceType, "srv");
-      const requestSchema = svc.request?.schema ?? svc.requestSchema ?? "";
-      const responseSchema = svc.response?.schema ?? svc.responseSchema ?? "";
+      const advertisedType = normalizeRosType(svc.type || serviceType, "srv");
+      const requestSchema = serviceRequestSchema(svc);
+      const responseSchema = serviceResponseSchema(svc);
       if (!requestSchema) {
         reject(new Error(`No request definition for service ${serviceName}`));
         return;
       }
 
-      const requestWriter = this.getWriter(canonicalType + "_Request", requestSchema);
+      const requestWriter = this.getWriter(advertisedType + "_Request", requestSchema);
       const responseReader = responseSchema
-        ? this.getReader(canonicalType + "_Response", responseSchema)
+        ? this.getReader(advertisedType + "_Response", responseSchema)
         : null;
 
       const requestData = requestWriter.writeMessage(request);
@@ -482,6 +679,121 @@ export class Ros {
 
       this.pendingServiceCalls.set(callId, { resolve, reject, responseReader });
     });
+  }
+
+  sendActionGoal<TGoal = Record<string, unknown>, TResult = unknown, TFeedback = unknown>(
+    actionName: string,
+    actionType: string,
+    goal: TGoal,
+    onResult?: (result: ActionResult<TResult>) => void,
+    onFeedback?: (feedback: ActionFeedback<TFeedback>) => void,
+    onError?: (error: Error) => void,
+    goalId = newGoalId()
+  ): string {
+    const canonicalActionType = normalizeRosType(actionType, "action");
+    const uuid = goalIdToUuidBytes(goalId);
+    const missing = this.getMissingActionEndpoints(actionName, {
+      requireFeedback: onFeedback !== undefined
+    });
+    if (missing.length > 0) {
+      const error = new Error(
+        `Action ${actionName} is not fully advertised by foxglove_bridge; missing ${missing.join(
+          ", "
+        )}. ROS 2 action endpoints are hidden topics/services in Foxglove, so launch foxglove_bridge with include_hidden:=true when using ActionClient.`
+      );
+      if (onError) {
+        onError(error);
+        return goalId;
+      }
+      throw error;
+    }
+
+    let feedbackCallback: MessageCallback | undefined;
+    const feedbackTopic = actionEndpoint(actionName, "feedback");
+    if (onFeedback) {
+      feedbackCallback = (message: Record<string, unknown>) => {
+        if ("goal_id" in message && !sameUuid(message.goal_id, uuid)) return;
+        const values = (message.feedback ?? message) as TFeedback;
+        onFeedback({ action: actionName, id: goalId, values, feedback: values });
+      };
+      this.subscribeTopic(
+        feedbackTopic,
+        `${canonicalActionType}_FeedbackMessage`,
+        feedbackCallback
+      );
+    }
+
+    const cleanupFeedback = () => {
+      if (feedbackCallback) this.unsubscribeTopic(feedbackTopic, feedbackCallback);
+    };
+
+    const sendGoalService = actionEndpoint(actionName, "send_goal");
+    const getResultService = actionEndpoint(actionName, "get_result");
+    const sendGoalRequest = this.actionSendGoalRequest(sendGoalService, uuid, goal);
+
+    this.callService(sendGoalService, `${canonicalActionType}_SendGoal`, sendGoalRequest)
+      .then((response) => {
+        if (response.accepted === false) {
+          cleanupFeedback();
+          onResult?.({
+            action: actionName,
+            id: goalId,
+            status: 0,
+            result: false,
+            accepted: false,
+            values: response as TResult,
+            response
+          });
+          return undefined;
+        }
+        return this.callService(getResultService, `${canonicalActionType}_GetResult`, {
+          goal_id: { uuid }
+        });
+      })
+      .then((response) => {
+        if (!response) return;
+        cleanupFeedback();
+        const values = (response.result ?? response) as TResult;
+        onResult?.({
+          action: actionName,
+          id: goalId,
+          status: Number(response.status ?? 0),
+          result: true,
+          accepted: true,
+          values,
+          response
+        });
+      })
+      .catch((err: unknown) => {
+        cleanupFeedback();
+        const error = err instanceof Error ? err : new Error(String(err));
+        if (onError) onError(error);
+        else this.emit("error", error);
+      });
+
+    return goalId;
+  }
+
+  cancelActionGoal(actionName: string, goalId: string): Promise<Record<string, unknown>> {
+    return this.callService(actionEndpoint(actionName, "cancel_goal"), "action_msgs/srv/CancelGoal", {
+      goal_info: {
+        goal_id: { uuid: goalIdToUuidBytes(goalId) },
+        stamp: { sec: 0, nanosec: 0 }
+      }
+    });
+  }
+
+  private actionSendGoalRequest<TGoal>(
+    serviceName: string,
+    uuid: number[],
+    goal: TGoal
+  ): Record<string, unknown> {
+    const svc = this.servicesByName.get(serviceName);
+    const fields = svc ? firstSchemaFieldNames(serviceRequestSchema(svc)) : new Set();
+    if (fields.size === 0 || fields.has("goal")) {
+      return { goal_id: { uuid }, goal };
+    }
+    return { goal_id: { uuid }, ...(goal as Record<string, unknown>) };
   }
 
   // ─── Parameters ─────────────────────────────────────────────────────────
@@ -561,6 +873,7 @@ export class Ros {
       this.pendingSubscribers.length = 0;
 
       this.emit("channelsChanged");
+      this.emit("servicesChanged");
       this.emit("close");
     });
 
@@ -596,6 +909,7 @@ export class Ros {
         this.services.set(svc.id, svc);
         this.servicesByName.set(svc.name, svc);
       }
+      this.emit("servicesChanged");
     });
 
     this.protocol.on("unadvertiseServices", (serviceIds: number[]) => {
@@ -606,6 +920,7 @@ export class Ros {
           this.services.delete(id);
         }
       }
+      this.emit("servicesChanged");
     });
 
     this.protocol.on(
